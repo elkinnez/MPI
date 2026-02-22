@@ -74,14 +74,45 @@ int main(void)
   HAL_Init();
 
   /* USER CODE BEGIN Init */
-  int numeros[10]={	~63,~6,~91,~79,	~102,~109,~125,~7,~127,~111};
+  const uint16_t letras[26] = {
+      ~0x0F77, // A
+      ~0x1F7F, // B
+      ~0x0039, // C
+      ~0x1E3F, // D
+	  (~0x03F9) & 0x3FFF, // E
+      ~0x0071, // F
+      ~0x0B3D, // G
+      ~0x0F76, // H
+      ~0x0006, // I
+      ~0x001E, // J
+      ~0x2470, // K
+      ~0x0038, // L
+      ~0x0536, // M
+	  (~0x094E) & 0x3FFF, // N
+      ~0x003F, // O
+      ~0x0F73, // P
+      ~0x203F, // Q
+      ~0x2F73, // R
+      ~0x0B6D, // S
+      ~0x0007, // T
+      ~0x003E, // U
+      ~0x1430, // V
+      ~0x2836, // W
+      ~0x2D40, // X
+      ~0x1540, // Y
+	  (~0x2409) & 0x3FFF // Z
+  };
 
-  int cont=0;
-  int contAux=0;
-  int unidades=0;
-  int decenas=0;
+  char nombre[] = "MATEOMBITANEZ";   // espacios al final
+  int largo = sizeof(nombre) - 1;
 
+  int indice = 0;
+  int direccion = 1;
 
+  int estadoAnterior = 1;
+
+  int cont = 0;
+  int contScroll = 0;
   /* USER CODE END Init */
 
   /* Configure the system clock */
@@ -102,85 +133,79 @@ int main(void)
   while (1)
   {
     /* USER CODE END WHILE */
+	    // -------- BOTON --------
+	    int estadoBoton = HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13);
+
+	    if(estadoBoton == 0 && estadoAnterior == 1)
+	    {
+	        direccion = -direccion;
+	        HAL_Delay(200);  // anti rebote
+	    }
+
+	    estadoAnterior = estadoBoton;
+
+
+	    // -------- CONTROL DE VELOCIDAD DEL SCROLL --------
+	    HAL_Delay(1);
+	    contScroll++;
+
+	    if(contScroll >= 600)   // velocidad del movimiento
+	    {
+	        contScroll = 0;
+
+	        indice += direccion;
+
+	        if(indice >= largo)
+	            indice = 0;
+
+	        if(indice < 0)
+	            indice = largo - 1;
+	    }
+
+
+	    // -------- MULTIPLEXADO --------
+
+	    GPIOB->ODR &= ~0x0003;   // apagar ambos
+
+	    switch(cont)
+	    {
+	        case 0:   // derecho
+	        {
+	            char letra = nombre[indice];
+
+	            if(letra >= 'A' && letra <= 'Z')
+	                GPIOA->ODR = letras[letra - 'A'];
+	            else
+	                GPIOA->ODR = 0x0000;
+
+	            GPIOB->ODR |= 0x0001;
+	            break;
+	        }
+
+	        case 1:   // izquierdo
+	        {
+	            int anterior = indice - 1;
+
+	            if(anterior < 0)
+	                anterior = largo - 1;
+
+	            char letra = nombre[anterior];
+
+	            if(letra >= 'A' && letra <= 'Z')
+	                GPIOA->ODR = letras[letra - 'A'];
+	            else
+	                GPIOA->ODR = 0x0000;
+
+	            GPIOB->ODR |= 0x0002;
+	            break;
+	        }
+	    }
+
+	    cont++;
+	    if(cont >= 2)
+	        cont = 0;
 
     /* USER CODE BEGIN 3 */
-
-	  //HAL_GPIO_TogglePin (GPIOB, LEDB_Pin);
-	  //GPIOA->BSRR = numeros[i];
-	  //GPIOA->ODR = (GPIOA->ODR & ~0x007F) | numeros[i];
-	  HAL_Delay(5);   // velocidad de multiplexado (NO subir más de 5)
-
-	      // -------- BOTON CAMBIA DIRECCION --------
-	  // -------- BOTON CAMBIA DIRECCION --------
-	  static int direccion = 1;
-	  static GPIO_PinState estadoAnterior = GPIO_PIN_SET;
-
-	  GPIO_PinState estadoBoton = HAL_GPIO_ReadPin(BUUTON_GPIO_Port, BUUTON_Pin);
-
-	  if(estadoBoton == GPIO_PIN_RESET && estadoAnterior == GPIO_PIN_SET)
-	  {
-	      direccion = -direccion;
-	      HAL_Delay(200);   // anti-rebote
-	  }
-
-	  estadoAnterior = estadoBoton;
-	      // -------- CONTADOR --------
-	      contAux++;
-
-	      if(contAux == 100)   // velocidad del conteo
-	      {
-	          contAux = 0;
-
-	          unidades += direccion;
-
-	          if(unidades > 9)
-	          {
-	              unidades = 0;
-	              decenas++;
-	          }
-
-	          if(unidades < 0)
-	          {
-	              unidades = 9;
-	              decenas--;
-	          }
-
-	          if(decenas > 9)
-	              decenas = 0;
-
-	          if(decenas < 0)
-	              decenas = 9;
-	      }
-
-
-	      // -------- MULTIPLEXADO (SOLO 2 DIGITOS) --------
-	      switch(cont)
-	      {
-	          case 0:
-	              GPIOA->ODR = (GPIOA->ODR & ~0x007F) | numeros[decenas];
-	              GPIOB->ODR = (GPIOB->ODR & ~0x000F) | 11;   // Q2
-	              break;
-
-	          case 1:
-	              GPIOA->ODR = (GPIOA->ODR & ~0x007F) | numeros[unidades];
-	              GPIOB->ODR = (GPIOB->ODR & ~0x000F) | 7;    // Q3
-	              break;
-	      }
-
-
-	      // Encender dígito correcto
-	      if(cont == 0)
-	      {
-	          HAL_GPIO_WritePin(GPIOB, Q1_Pin, GPIO_PIN_SET);
-	      }
-	      else
-	      {
-	          HAL_GPIO_WritePin(GPIOB, Q2_Pin, GPIO_PIN_SET);
-	      }
-	      cont++;
-	      if(cont > 1)
-	          cont = 0;
-
   }
   /* USER CODE END 3 */
 }
@@ -251,11 +276,11 @@ static void MX_GPIO_Init(void)
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOB, Q1_Pin|Q2_Pin, GPIO_PIN_RESET);
 
-  /*Configure GPIO pin : BUUTON_Pin */
-  GPIO_InitStruct.Pin = BUUTON_Pin;
+  /*Configure GPIO pin : BUTTON_Pin */
+  GPIO_InitStruct.Pin = BUTTON_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(BUUTON_GPIO_Port, &GPIO_InitStruct);
+  HAL_GPIO_Init(BUTTON_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pins : A_Pin B_Pin C_Pin D_Pin
                            E_Pin F_Pin G1_Pin G2_Pin
