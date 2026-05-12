@@ -4,16 +4,6 @@
   * @file           : main.c
   * @brief          : Main program body
   ******************************************************************************
-  * @attention
-  *
-  * Copyright (c) 2026 STMicroelectronics.
-  * All rights reserved.
-  *
-  * This software is licensed under terms that can be found in the LICENSE file
-  * in the root directory of this software component.
-  * If no LICENSE file comes with this software, it is provided AS-IS.
-  *
-  ******************************************************************************
   */
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
@@ -31,9 +21,14 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define PWM_IZQ          TIM_CHANNEL_1   // PA8
-#define PWM_DER          TIM_CHANNEL_3   // PA10
-#define TIM_MOTORES      &htim1
+// Canales PWM de TIM2
+#define PWM_IZQ_CH        TIM_CHANNEL_1   // PA0 -> MOTOR_L_PWM
+#define PWM_DER_CH        TIM_CHANNEL_2   // PA1 -> MOTOR_R_PWM
+#define TIM_MOTORES       &htim2
+
+// Factor de conversión para ultrasonido (mm)
+// velocidad sonido ~ 0.0343 cm/us => 0.343 mm/us -> distancia = pulso_us * 0.343 / 2
+#define US_FACTOR_MM      0.1715f
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -43,41 +38,113 @@
 
 /* Private variables ---------------------------------------------------------*/
 ADC_HandleTypeDef hadc1;
+DMA_HandleTypeDef hdma_adc1;
 
-TIM_HandleTypeDef htim1;
+TIM_HandleTypeDef htim2;
 TIM_HandleTypeDef htim3;
 
-UART_HandleTypeDef huart3;
+UART_HandleTypeDef huart1;
 
 /* USER CODE BEGIN PV */
+// Variables para ultrasonido (interrupción)
+volatile uint32_t IC_Val1 = 0;
+volatile uint32_t IC_Val2 = 0;
+volatile uint8_t  Is_First_Captured = 0;
+volatile uint8_t  Distance_Ready = 0;
+volatile float    distancia_mm = 0.0f;
 
+uint32_t tiempo_ultimo_disparo = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
-static void MX_ADC1_Init(void);
-static void MX_TIM1_Init(void);
+static void MX_DMA_Init(void);
 static void MX_TIM3_Init(void);
-static void MX_USART3_UART_Init(void);
+static void MX_TIM2_Init(void);
+static void MX_USART1_UART_Init(void);
+static void MX_ADC1_Init(void);
 /* USER CODE BEGIN PFP */
-
+void MoverMotores(int16_t vel_izq, int16_t vel_der);
+void DispararUltrasonido(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
-uint16_t sensor_linea_izq = 0;
-uint16_t sensor_linea_der = 0;
-uint16_t sensor_corriente = 0;
-uint32_t distancia_mm = 0;
-uint32_t tiempo_ultimo_disparo = 0;
+/**
+ * @brief  Control de motores con TB6612FNG
+ */
+void MoverMotores(int16_t vel_izq, int16_t vel_der)
+{
+    if(vel_izq > 3599) vel_izq = 3599;
+    if(vel_izq < -3599) vel_izq = -3599;
+    if(vel_der > 3599) vel_der = 3599;
+    if(vel_der < -3599) vel_der = -3599;
 
-// ========== PROTOTIPOS ==========
-void MoverMotores(int16_t vel_izq, int16_t vel_der);
-void LeerSensores(void);
-void MedirDistancia(void);
+    // Motor izquierdo
+    if(vel_izq >= 0) {
+        HAL_GPIO_WritePin(MOTOR_L_IN1_GPIO_Port, MOTOR_L_IN1_Pin, GPIO_PIN_SET);
+        __HAL_TIM_SET_COMPARE(TIM_MOTORES, PWM_IZQ_CH, vel_izq);
+    } else {
+        HAL_GPIO_WritePin(MOTOR_L_IN1_GPIO_Port, MOTOR_L_IN1_Pin, GPIO_PIN_RESET);
+        __HAL_TIM_SET_COMPARE(TIM_MOTORES, PWM_IZQ_CH, -vel_izq);
+    }
 
+    // Motor derecho
+    if(vel_der >= 0) {
+        HAL_GPIO_WritePin(MOTOR_R_IN1_GPIO_Port, MOTOR_R_IN1_Pin, GPIO_PIN_SET);
+        __HAL_TIM_SET_COMPARE(TIM_MOTORES, PWM_DER_CH, vel_der);
+    } else {
+        HAL_GPIO_WritePin(MOTOR_R_IN1_GPIO_Port, MOTOR_R_IN1_Pin, GPIO_PIN_RESET);
+        __HAL_TIM_SET_COMPARE(TIM_MOTORES, PWM_DER_CH, -vel_der);
+    }
+}
+
+/**
+ * @brief  Pulso de 10 us en TRIG
+ */
+void DispararUltrasonido(void)
+{
+    HAL_GPIO_WritePin(TRIG_US_GPIO_Port, TRIG_US_Pin, GPIO_PIN_SET);
+    for(volatile int i = 0; i < 72; i++) { __NOP(); }  // ~10 µs a 72 MHz
+    HAL_GPIO_WritePin(TRIG_US_GPIO_Port, TRIG_US_Pin, GPIO_PIN_RESET);
+}
+
+/**
+ * @brief  Callback de TIM3: mide ancho de pulso ECHO
+ */
+void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
+{
+    if(htim->Instance == TIM3 && htim->Channel == HAL_TIM_ACTIVE_CHANNEL_4)
+    {
+        if(Is_First_Captured == 0)
+        {
+            IC_Val1 = HAL_TIM_ReadCapturedValue(&htim3, TIM_CHANNEL_4);
+            Is_First_Captured = 1;
+            __HAL_TIM_SET_CAPTUREPOLARITY(&htim3, TIM_CHANNEL_4, TIM_INPUTCHANNELPOLARITY_FALLING);
+        }
+        else
+        {
+            IC_Val2 = HAL_TIM_ReadCapturedValue(&htim3, TIM_CHANNEL_4);
+            Is_First_Captured = 0;
+            __HAL_TIM_SET_CAPTUREPOLARITY(&htim3, TIM_CHANNEL_4, TIM_INPUTCHANNELPOLARITY_RISING);
+
+            uint32_t pulso_us;
+            if(IC_Val2 > IC_Val1)
+                pulso_us = IC_Val2 - IC_Val1;
+            else
+                pulso_us = (0xFFFF - IC_Val1) + IC_Val2 + 1;
+
+            if(pulso_us > 0 && pulso_us < 38000)
+                distancia_mm = pulso_us * US_FACTOR_MM;
+            else
+                distancia_mm = 4000.0f;
+
+            Distance_Ready = 1;
+        }
+    }
+}
 /* USER CODE END 0 */
 
 /**
@@ -109,27 +176,33 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
-  MX_ADC1_Init();
-  MX_TIM1_Init();
+  MX_DMA_Init();
   MX_TIM3_Init();
-  MX_USART3_UART_Init();
+  MX_TIM2_Init();
+  MX_USART1_UART_Init();
+  MX_ADC1_Init();
   /* USER CODE BEGIN 2 */
+  // Arrancar PWM
+  HAL_TIM_PWM_Start(TIM_MOTORES, PWM_IZQ_CH);
+  HAL_TIM_PWM_Start(TIM_MOTORES, PWM_DER_CH);
 
+  // Habilitar driver
+  HAL_GPIO_WritePin(MOTOR_STBY_GPIO_Port, MOTOR_STBY_Pin, GPIO_PIN_SET);
 
-  HAL_TIM_IC_Start(&htim3, TIM_CHANNEL_1);
+  // Iniciar captura de ultrasonido (interrupción)
+  HAL_TIM_IC_Start_IT(&htim3, TIM_CHANNEL_4);
 
-
-  for(int i = 0; i < 3; i++) {
-      HAL_GPIO_WritePin(LED_ESTADO_GPIO_Port, LED_ESTADO_Pin, GPIO_PIN_SET);
-      HAL_Delay(100);
-      HAL_GPIO_WritePin(LED_ESTADO_GPIO_Port, LED_ESTADO_Pin, GPIO_PIN_RESET);
-      HAL_Delay(100);
+  // Parpadeo de arranque (LED_ESTADO, lógica invertida)
+  for(int i = 0; i < 3; i++)
+  {
+      HAL_GPIO_TogglePin(LED_ESTADO_GPIO_Port, LED_ESTADO_Pin);
+      HAL_Delay(150);
   }
+  HAL_GPIO_WritePin(LED_ESTADO_GPIO_Port, LED_ESTADO_Pin, GPIO_PIN_SET); // apagado
 
-
-  // LED frontal encendido = robot listo para combate
-  HAL_GPIO_WritePin(LED_FRONTAL_GPIO_Port, LED_FRONTAL_Pin, GPIO_PIN_SET);
-
+  char msg[60];
+  sprintf(msg, "SumoBot E1 - Listo\r\n");
+  HAL_UART_Transmit(&huart1, (uint8_t*)msg, strlen(msg), 100);
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -137,30 +210,6 @@ int main(void)
   while (1)
   {
     /* USER CODE END WHILE */
-
-	  LeerSensores();
-	  MedirDistancia();
-
-	    if(sensor_linea_izq > 3000 || sensor_linea_der > 3000) {
-	      // Retroceder y girar para salvarse
-	        MoverMotores(-700, 600);
-	        HAL_Delay(120);
-	    }
-	    else if(distancia_mm < 150 && distancia_mm > 10) {
-	        // Ataque frontal total
-	        MoverMotores(950, 950);
-	        // LED frontal parpadea rápido durante ataque
-	        HAL_GPIO_TogglePin(LED_FRONTAL_GPIO_Port, LED_FRONTAL_Pin);
-	        HAL_Delay(50);
-	        HAL_GPIO_TogglePin(LED_FRONTAL_GPIO_Port, LED_FRONTAL_Pin);
-	    }
-	    else {
-	        // Giro hacia la derecha }
-	        MoverMotores(600, -400);
-	    }
-
-
-	    HAL_Delay(20);
 
     /* USER CODE BEGIN 3 */
   }
@@ -239,7 +288,7 @@ static void MX_ADC1_Init(void)
   hadc1.Init.DiscontinuousConvMode = DISABLE;
   hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
   hadc1.Init.DataAlign = ADC_DATAALIGN_RIGHT;
-  hadc1.Init.NbrOfConversion = 3;
+  hadc1.Init.NbrOfConversion = 4;
   if (HAL_ADC_Init(&hadc1) != HAL_OK)
   {
     Error_Handler();
@@ -247,9 +296,36 @@ static void MX_ADC1_Init(void)
 
   /** Configure Regular Channel
   */
-  sConfig.Channel = ADC_CHANNEL_0;
+  sConfig.Channel = ADC_CHANNEL_8;
   sConfig.Rank = ADC_REGULAR_RANK_1;
   sConfig.SamplingTime = ADC_SAMPLETIME_55CYCLES_5;
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure Regular Channel
+  */
+  sConfig.Channel = ADC_CHANNEL_5;
+  sConfig.Rank = ADC_REGULAR_RANK_2;
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure Regular Channel
+  */
+  sConfig.Channel = ADC_CHANNEL_6;
+  sConfig.Rank = ADC_REGULAR_RANK_3;
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure Regular Channel
+  */
+  sConfig.Channel = ADC_CHANNEL_7;
+  sConfig.Rank = ADC_REGULAR_RANK_4;
   if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
   {
     Error_Handler();
@@ -261,79 +337,65 @@ static void MX_ADC1_Init(void)
 }
 
 /**
-  * @brief TIM1 Initialization Function
+  * @brief TIM2 Initialization Function
   * @param None
   * @retval None
   */
-static void MX_TIM1_Init(void)
+static void MX_TIM2_Init(void)
 {
 
-  /* USER CODE BEGIN TIM1_Init 0 */
+  /* USER CODE BEGIN TIM2_Init 0 */
 
-  /* USER CODE END TIM1_Init 0 */
+  /* USER CODE END TIM2_Init 0 */
 
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
   TIM_MasterConfigTypeDef sMasterConfig = {0};
   TIM_OC_InitTypeDef sConfigOC = {0};
-  TIM_BreakDeadTimeConfigTypeDef sBreakDeadTimeConfig = {0};
 
-  /* USER CODE BEGIN TIM1_Init 1 */
+  /* USER CODE BEGIN TIM2_Init 1 */
 
-  /* USER CODE END TIM1_Init 1 */
-  htim1.Instance = TIM1;
-  htim1.Init.Prescaler = 0;
-  htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim1.Init.Period = 999;
-  htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
-  htim1.Init.RepetitionCounter = 0;
-  htim1.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
-  if (HAL_TIM_PWM_Init(&htim1) != HAL_OK)
+  /* USER CODE END TIM2_Init 1 */
+  htim2.Instance = TIM2;
+  htim2.Init.Prescaler = 0;
+  htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim2.Init.Period = 3599;
+  htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim2, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_PWM_Init(&htim2) != HAL_OK)
   {
     Error_Handler();
   }
   sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
   sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
-  if (HAL_TIMEx_MasterConfigSynchronization(&htim1, &sMasterConfig) != HAL_OK)
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim2, &sMasterConfig) != HAL_OK)
   {
     Error_Handler();
   }
   sConfigOC.OCMode = TIM_OCMODE_PWM1;
   sConfigOC.Pulse = 0;
   sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
-  sConfigOC.OCNPolarity = TIM_OCNPOLARITY_HIGH;
   sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
-  sConfigOC.OCIdleState = TIM_OCIDLESTATE_RESET;
-  sConfigOC.OCNIdleState = TIM_OCNIDLESTATE_RESET;
-  if (HAL_TIM_PWM_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
+  if (HAL_TIM_PWM_ConfigChannel(&htim2, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
   {
     Error_Handler();
   }
-  if (HAL_TIM_PWM_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_2) != HAL_OK)
+  if (HAL_TIM_PWM_ConfigChannel(&htim2, &sConfigOC, TIM_CHANNEL_2) != HAL_OK)
   {
     Error_Handler();
   }
-  if (HAL_TIM_PWM_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_3) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  if (HAL_TIM_PWM_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_4) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  sBreakDeadTimeConfig.OffStateRunMode = TIM_OSSR_DISABLE;
-  sBreakDeadTimeConfig.OffStateIDLEMode = TIM_OSSI_DISABLE;
-  sBreakDeadTimeConfig.LockLevel = TIM_LOCKLEVEL_OFF;
-  sBreakDeadTimeConfig.DeadTime = 0;
-  sBreakDeadTimeConfig.BreakState = TIM_BREAK_DISABLE;
-  sBreakDeadTimeConfig.BreakPolarity = TIM_BREAKPOLARITY_HIGH;
-  sBreakDeadTimeConfig.AutomaticOutput = TIM_AUTOMATICOUTPUT_DISABLE;
-  if (HAL_TIMEx_ConfigBreakDeadTime(&htim1, &sBreakDeadTimeConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN TIM1_Init 2 */
+  /* USER CODE BEGIN TIM2_Init 2 */
 
-  /* USER CODE END TIM1_Init 2 */
-  HAL_TIM_MspPostInit(&htim1);
+  /* USER CODE END TIM2_Init 2 */
+  HAL_TIM_MspPostInit(&htim2);
 
 }
 
@@ -349,6 +411,7 @@ static void MX_TIM3_Init(void)
 
   /* USER CODE END TIM3_Init 0 */
 
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
   TIM_MasterConfigTypeDef sMasterConfig = {0};
   TIM_IC_InitTypeDef sConfigIC = {0};
 
@@ -361,6 +424,15 @@ static void MX_TIM3_Init(void)
   htim3.Init.Period = 65535;
   htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim3.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim3, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
   if (HAL_TIM_IC_Init(&htim3) != HAL_OK)
   {
     Error_Handler();
@@ -374,8 +446,8 @@ static void MX_TIM3_Init(void)
   sConfigIC.ICPolarity = TIM_INPUTCHANNELPOLARITY_RISING;
   sConfigIC.ICSelection = TIM_ICSELECTION_DIRECTTI;
   sConfigIC.ICPrescaler = TIM_ICPSC_DIV1;
-  sConfigIC.ICFilter = 0;
-  if (HAL_TIM_IC_ConfigChannel(&htim3, &sConfigIC, TIM_CHANNEL_1) != HAL_OK)
+  sConfigIC.ICFilter = 4;
+  if (HAL_TIM_IC_ConfigChannel(&htim3, &sConfigIC, TIM_CHANNEL_4) != HAL_OK)
   {
     Error_Handler();
   }
@@ -386,35 +458,51 @@ static void MX_TIM3_Init(void)
 }
 
 /**
-  * @brief USART3 Initialization Function
+  * @brief USART1 Initialization Function
   * @param None
   * @retval None
   */
-static void MX_USART3_UART_Init(void)
+static void MX_USART1_UART_Init(void)
 {
 
-  /* USER CODE BEGIN USART3_Init 0 */
+  /* USER CODE BEGIN USART1_Init 0 */
 
-  /* USER CODE END USART3_Init 0 */
+  /* USER CODE END USART1_Init 0 */
 
-  /* USER CODE BEGIN USART3_Init 1 */
+  /* USER CODE BEGIN USART1_Init 1 */
 
-  /* USER CODE END USART3_Init 1 */
-  huart3.Instance = USART3;
-  huart3.Init.BaudRate = 9600;
-  huart3.Init.WordLength = UART_WORDLENGTH_8B;
-  huart3.Init.StopBits = UART_STOPBITS_1;
-  huart3.Init.Parity = UART_PARITY_NONE;
-  huart3.Init.Mode = UART_MODE_TX_RX;
-  huart3.Init.HwFlowCtl = UART_HWCONTROL_NONE;
-  huart3.Init.OverSampling = UART_OVERSAMPLING_16;
-  if (HAL_UART_Init(&huart3) != HAL_OK)
+  /* USER CODE END USART1_Init 1 */
+  huart1.Instance = USART1;
+  huart1.Init.BaudRate = 115200;
+  huart1.Init.WordLength = UART_WORDLENGTH_8B;
+  huart1.Init.StopBits = UART_STOPBITS_1;
+  huart1.Init.Parity = UART_PARITY_NONE;
+  huart1.Init.Mode = UART_MODE_TX_RX;
+  huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart1.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart1) != HAL_OK)
   {
     Error_Handler();
   }
-  /* USER CODE BEGIN USART3_Init 2 */
+  /* USER CODE BEGIN USART1_Init 2 */
 
-  /* USER CODE END USART3_Init 2 */
+  /* USER CODE END USART1_Init 2 */
+
+}
+
+/**
+  * Enable DMA controller clock
+  */
+static void MX_DMA_Init(void)
+{
+
+  /* DMA controller clock enable */
+  __HAL_RCC_DMA1_CLK_ENABLE();
+
+  /* DMA interrupt init */
+  /* DMA1_Channel1_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Channel1_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Channel1_IRQn);
 
 }
 
@@ -440,8 +528,10 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_WritePin(LED_ESTADO_GPIO_Port, LED_ESTADO_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, LED_FRONTAL_Pin|MOTOR_IZQ_DIR1_Pin|MOTOR_IZQ_DIR2_Pin|MOTOR_DER_DIR1_Pin
-                          |MOTOR_DER_DIR2_Pin|TRIG_US_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOA, MOTOR_L_IN1_Pin|MOTOR_R_IN1_Pin|MOTOR_STBY_Pin|TRIG_US_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(TRIG_USB7_GPIO_Port, TRIG_USB7_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin : LED_ESTADO_Pin */
   GPIO_InitStruct.Pin = LED_ESTADO_Pin;
@@ -450,20 +540,25 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(LED_ESTADO_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : LED_FRONTAL_Pin MOTOR_IZQ_DIR1_Pin MOTOR_IZQ_DIR2_Pin MOTOR_DER_DIR1_Pin
-                           MOTOR_DER_DIR2_Pin TRIG_US_Pin */
-  GPIO_InitStruct.Pin = LED_FRONTAL_Pin|MOTOR_IZQ_DIR1_Pin|MOTOR_IZQ_DIR2_Pin|MOTOR_DER_DIR1_Pin
-                          |MOTOR_DER_DIR2_Pin|TRIG_US_Pin;
+  /*Configure GPIO pins : MOTOR_L_IN1_Pin MOTOR_R_IN1_Pin MOTOR_STBY_Pin TRIG_US_Pin */
+  GPIO_InitStruct.Pin = MOTOR_L_IN1_Pin|MOTOR_R_IN1_Pin|MOTOR_STBY_Pin|TRIG_US_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : ECHO_US_Pin */
-  GPIO_InitStruct.Pin = ECHO_US_Pin;
+  /*Configure GPIO pin : TRIG_USB7_Pin */
+  GPIO_InitStruct.Pin = TRIG_USB7_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(TRIG_USB7_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : ECHO_USB8_Pin */
+  GPIO_InitStruct.Pin = ECHO_USB8_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(ECHO_US_GPIO_Port, &GPIO_InitStruct);
+  HAL_GPIO_Init(ECHO_USB8_GPIO_Port, &GPIO_InitStruct);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
@@ -471,88 +566,6 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
-// ===== FUNCIÓN PARA MOVER LOS MOTORES =====
-void MoverMotores(int16_t vel_izq, int16_t vel_der) {
-    // Limitar velocidades (rango válido: -999 a 999)
-    if(vel_izq > 999) vel_izq = 999;
-    if(vel_izq < -999) vel_izq = -999;
-    if(vel_der > 999) vel_der = 999;
-    if(vel_der < -999) vel_der = -999;
-
-    // ----- MOTOR IZQUIERDO -----
-    if(vel_izq >= 0) {
-        // Adelante
-        HAL_GPIO_WritePin(MOTOR_IZQ_DIR1_GPIO_Port, MOTOR_IZQ_DIR1_Pin, GPIO_PIN_SET);
-        HAL_GPIO_WritePin(MOTOR_IZQ_DIR2_GPIO_Port, MOTOR_IZQ_DIR2_Pin, GPIO_PIN_RESET);
-        __HAL_TIM_SET_COMPARE(TIM_MOTORES, PWM_IZQ, vel_izq);
-    } else {
-        // Atrás
-        HAL_GPIO_WritePin(MOTOR_IZQ_DIR1_GPIO_Port, MOTOR_IZQ_DIR1_Pin, GPIO_PIN_RESET);
-        HAL_GPIO_WritePin(MOTOR_IZQ_DIR2_GPIO_Port, MOTOR_IZQ_DIR2_Pin, GPIO_PIN_SET);
-        __HAL_TIM_SET_COMPARE(TIM_MOTORES, PWM_IZQ, -vel_izq);
-    }
-
-    // ----- MOTOR DERECHO -----
-    if(vel_der >= 0) {
-        // Adelante
-        HAL_GPIO_WritePin(MOTOR_DER_DIR1_GPIO_Port, MOTOR_DER_DIR1_Pin, GPIO_PIN_SET);
-        HAL_GPIO_WritePin(MOTOR_DER_DIR2_GPIO_Port, MOTOR_DER_DIR2_Pin, GPIO_PIN_RESET);
-        __HAL_TIM_SET_COMPARE(TIM_MOTORES, PWM_DER, vel_der);
-    } else {
-        // Atrás
-        HAL_GPIO_WritePin(MOTOR_DER_DIR1_GPIO_Port, MOTOR_DER_DIR1_Pin, GPIO_PIN_RESET);
-        HAL_GPIO_WritePin(MOTOR_DER_DIR2_GPIO_Port, MOTOR_DER_DIR2_Pin, GPIO_PIN_SET);
-        __HAL_TIM_SET_COMPARE(TIM_MOTORES, PWM_DER, -vel_der);
-    }
-}
-
-// ===== FUNCIÓN PARA LEER LOS SENSORES ANALÓGICOS (ADC) =====
-void LeerSensores(void) {
-    uint16_t adc_valores[3];
-
-    HAL_ADC_Start(&hadc1);
-    if(HAL_ADC_PollForConversion(&hadc1, 100) == HAL_OK) {
-        adc_valores[0] = HAL_ADC_GetValue(&hadc1);  // Canal 0 (PA0) - Línea Izq
-        adc_valores[1] = HAL_ADC_GetValue(&hadc1);  // Canal 1 (PA1) - Línea Der
-        adc_valores[2] = HAL_ADC_GetValue(&hadc1);  // Canal 2 (PA2) - Corriente
-    }
-    HAL_ADC_Stop(&hadc1);
-
-    sensor_linea_izq = adc_valores[0];
-    sensor_linea_der = adc_valores[1];
-    sensor_corriente = adc_valores[2];
-}
-
-// ===== FUNCIÓN PARA MEDIR DISTANCIA CON ULTRASONIDO =====
-void MedirDistancia(void) {
-    uint32_t t_start, duracion;
-
-    // Medir cada 50ms máximo (20Hz)
-    if(HAL_GetTick() - tiempo_ultimo_disparo < 50) return;
-
-    // Disparar trigger por 10 microsegundos
-    HAL_GPIO_WritePin(TRIG_US_GPIO_Port, TRIG_US_Pin, GPIO_PIN_SET);
-    for(int i = 0; i < 10; i++) { __NOP(); }  // Aprox 10us a 72MHz
-    HAL_GPIO_WritePin(TRIG_US_GPIO_Port, TRIG_US_Pin, GPIO_PIN_RESET);
-
-    // Esperar Echo con timeout de 100ms
-    t_start = HAL_GetTick();
-    while(HAL_GPIO_ReadPin(ECHO_US_GPIO_Port, ECHO_US_Pin) == GPIO_PIN_RESET) {
-        if(HAL_GetTick() - t_start > 100) return;
-    }
-
-    t_start = HAL_GetTick();
-    while(HAL_GPIO_ReadPin(ECHO_US_GPIO_Port, ECHO_US_Pin) == GPIO_PIN_SET) {
-        if(HAL_GetTick() - t_start > 100) return;
-    }
-    duracion = HAL_GetTick() - t_start;
-
-    // Convertir tiempo a distancia (mm) - Velocidad del sonido: 340 m/s
-    distancia_mm = (duracion * 340) / 2;
-    if(distancia_mm > 500) distancia_mm = 500;
-
-    tiempo_ultimo_disparo = HAL_GetTick();
-}
 /* USER CODE END 4 */
 
 /**

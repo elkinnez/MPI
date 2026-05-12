@@ -52,6 +52,12 @@ default.size.stdout \
 OBJDUMP_LIST += \
 SUMO.list \
 
+OBJCOPY_HEX += \
+SUMO.hex \
+
+OBJCOPY_BIN += \
+SUMO.bin \
+
 
 # All Target
 all: main-build
@@ -75,12 +81,22 @@ SUMO.list: $(EXECUTABLES) makefile objects.list $(OPTIONAL_TOOL_DEPS)
 	@echo 'Finished building: $@'
 	@echo ' '
 
+SUMO.hex: $(EXECUTABLES) makefile objects.list $(OPTIONAL_TOOL_DEPS)
+	arm-none-eabi-objcopy  -O ihex $(EXECUTABLES) "SUMO.hex"
+	@echo 'Finished building: $@'
+	@echo ' '
+
+SUMO.bin: $(EXECUTABLES) makefile objects.list $(OPTIONAL_TOOL_DEPS)
+	arm-none-eabi-objcopy  -O binary $(EXECUTABLES) "SUMO.bin"
+	@echo 'Finished building: $@'
+	@echo ' '
+
 # Other Targets
 clean:
-	-$(RM) SUMO.elf SUMO.list SUMO.map default.size.stdout
+	-$(RM) SUMO.bin SUMO.elf SUMO.hex SUMO.list SUMO.map default.size.stdout
 	-@echo ' '
 
-secondary-outputs: $(SIZE_OUTPUT) $(OBJDUMP_LIST)
+secondary-outputs: $(SIZE_OUTPUT) $(OBJDUMP_LIST) $(OBJCOPY_HEX) $(OBJCOPY_BIN)
 
 fail-specified-linker-script-missing:
 	@echo 'Error: Cannot find the specified linker script. Check the linker settings in the build configuration.'
