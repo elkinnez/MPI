@@ -1,9 +1,7 @@
-../Core/Src/main.c:84:6:MoverMotores	7
-../Core/Src/main.c:124:6:PruebaMotores	3
-../Core/Src/main.c:158:6:ProcesarComando	9
-../Core/Src/main.c:191:5:main	4
-../Core/Src/main.c:252:6:SystemClock_Config	3
-../Core/Src/main.c:278:13:MX_TIM2_Init	7
-../Core/Src/main.c:314:13:MX_USART1_UART_Init	2
-../Core/Src/main.c:330:13:MX_GPIO_Init	1
-../Core/Src/main.c:360:6:Error_Handler	1
+../Core/Src/main.c:63:6:mostrar_cara	7
+../Core/Src/main.c:96:5:main	2
+../Core/Src/main.c:143:6:SystemClock_Config	3
+../Core/Src/main.c:176:13:MX_I2C1_Init	2
+../Core/Src/main.c:196:13:MX_TIM2_Init	4
+../Core/Src/main.c:229:13:MX_GPIO_Init	1
+../Core/Src/main.c:250:6:Error_Handler	1
